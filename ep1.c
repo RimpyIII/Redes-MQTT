@@ -40,6 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
+
 /** Para usar o mkfifo() **/
 #include <sys/stat.h>
 /** Para usar o open e conseguir abrir o pipe **/
@@ -56,10 +57,7 @@
 
 
 typedef struct{
-    int * topic_length_msb;
-    int * topic_length_lsb;
     int * connfd;
-    char * topic;
     char * pathname;
 }sub_par;
 
@@ -95,22 +93,36 @@ void * Thread2(void * args){
     int i;
     while ((n = read(fd, recvline, MAXLINE)) > 0){
         recvline[n] = 0;
-        char publish[4 + strlen(sub->topic) + strlen(recvline)];
-        publish[0] = 48;
-        publish[1] = 2 + strlen(sub->topic) + strlen(recvline);
-        publish[2] = * sub->topic_length_msb;
-        publish[3] = * sub->topic_length_lsb;
-        for(i = 0; i < strlen(sub->topic); i++) publish[i + 4] = sub->topic[i];
-        for(i = 0; i < strlen(recvline); i++) publish[i + 4 + strlen(sub->topic)] = recvline[i];
-        write(* sub->connfd, publish, 4 + strlen(sub->topic) + strlen(recvline));
+        write(* sub->connfd, recvline, n);
         close(fd);
         fd = open(sub->pathname, O_RDONLY);
     }
     close(fd);
+    unlink((const char *)sub->pathname);
     return NULL;
 }
-
-
+/*
+char encode_remain_length(int x){
+    int encodedByte;
+    do{
+        encodedByte = x % 128;
+        x = x / 128;
+        if (x > 0) encodedByte = encodedByte | 128;
+    }while(x > 0);
+    return (char) encodedByte;
+}
+*/
+int decode_remain_length(char * x){
+    int multiplier = 1, value = 0, encodedByte;
+    int i = 0;
+    do{
+        encodedByte = (int) x[i];
+        value += (encodedByte & 127) * multiplier;
+        multiplier = multiplier * 128;
+        i++;
+    }while ((encodedByte & 128) != 0);
+    return value;
+}
 
 int main (int argc, char **argv) {
     /* Os sockets. Um que será o socket que vai escutar pelas conexões
@@ -173,7 +185,6 @@ int main (int argc, char **argv) {
 
     printf("[Servidor no ar. Aguardando conexões na porta %s]\n",argv[1]);
     printf("[Para finalizar, pressione CTRL+c ou rode um kill ou killall]\n");
-   
     /* O servidor no final das contas é um loop infinito de espera por
      * conexões e processamento de cada uma individualmente */
 	for (;;) {
@@ -199,7 +210,6 @@ int main (int argc, char **argv) {
          * que voltar no loop para continuar aceitando novas conexões.
          * Se o retorno da função fork for zero, é porque está no
          * processo filho. */
-        
         if ( (childpid = fork()) == 0) {
             /**** PROCESSO FILHO ****/
             printf("[Uma conexão aberta]\n");
@@ -251,11 +261,6 @@ int main (int argc, char **argv) {
                         exit(1);
                     }
                     if ((int) recvline[8] == 4) connack_response = 0;//Protocol level - if different than four the Protocol Level is not supported by the server.
-                    //short int char_to_int = (int) recvline[9]; //Connect flag bits
-                    /*for (i = 0; i < 8; i++){//Separating the bits of the 8th byte in char_to_int
-                        bits[i] = char_to_int % 2;
-                        char_to_int = char_to_int / 2;
-                    }*/
                     if ((((int) recvline[9]) % 2) != 0){ // Validation of the reserved flag on the 7th byte
                         printf("Disconnecting : Reserved flag diffent than zero\n");
                         exit(1);
@@ -268,28 +273,6 @@ int main (int argc, char **argv) {
                        Will Retain - 0
                        User Name - 0
                        Password - 0                                                                              */
-                    /*
-                    if ((int) bits[1] != 1){// Clean Session - Implementing just the case when is set to 1.
-                        printf("Disconnecting : Clean Session with the flag set to 1 wasn't implement in this program\n");
-                        exit(1);
-                    }
-                    if ((int) bits[2] != 1) will_flag = 0;
-                    if ((int) bits[3] != 0 || (int) bits[4] != 0){// Will Qos- Implementing just the Qos level 0.
-                        printf("Disconnecting : Qos above zero wasn't implement in this program\n");
-                        exit(1);
-                    }
-                    if ((int) bits[5] != 0){// Will Retain - Implementing just non-retained messages.
-                        printf("Disconnecting : retained messages wasn't implement in this program\n");
-                        exit(1);
-                    }
-                    if ((int) bits[7] != 0){//User Name Flag - Not implementing clients with Username and Password
-                        printf("Disconnecting : Clients with username wasn't implemented in this program\n");
-                        exit(1);
-                    }
-                    if ((int) bits[6] != 0){//Password Flag 
-                        printf("Disconnecting : Password flag set to 1 while the username flag is set to 0\n");
-                        exit(1);
-                    }*/
                     //Keep alive not implemented, considering that all connections have a keep alive set to zero.
                     //Not taking the id of the client. We are going to use the pid of the process as indentifier of the client.
                     
@@ -298,84 +281,80 @@ int main (int argc, char **argv) {
                     write(connfd, connack, 4);
                 }
                 if ((int) recvline[0] >=  48 && recvline[0] <= 63){//PUBLISH - Control packet type
+                char * topic, * pid_char, * pathname;
+                int lenRemainLen = 0;
+                while(((int) (recvline[1 + lenRemainLen])) >= 128) lenRemainLen = lenRemainLen + 1;
+                char remaning_len[1 + lenRemainLen];
+                for(int i = 0; i <= lenRemainLen; i++) remaning_len[i] = recvline[1 + lenRemainLen];
+                if (lenRemainLen > 4) {
+                    printf("Length of remaning length greater than four. \n");
+                    exit(6);
+                }
                     // Ignoring the flags in the first four bits - supposing that that all flags are set to 0
                     int i;
-                    int remaning_len = (int) recvline[1], topic_length = (int) recvline[3] + (int) recvline[2] * 256;
-                    char topic_name[topic_length + 1], * message;
+                    int int_remaning_len = decode_remain_length(remaning_len), topic_length = (int) recvline[3 + lenRemainLen] + (int) recvline[2 + lenRemainLen] * 256;
+                    char topic_name[topic_length + 1];
                     for(i = 0; i < topic_length ; i++)
-                        topic_name[i] = recvline[i + 4];
+                        topic_name[i] = recvline[i + 4 + lenRemainLen];
                     topic_name[i] = 0;
-                    i = i + 4;
-                    message = malloc(remaning_len - (topic_length + 2) * sizeof(char));
-                    for(int j = 0; j < (remaning_len - (topic_length + 2)); i++, j++)
-                        message[j] = recvline[i];
-                    char template[15 + topic_length];
+                    char * template = malloc((28 + topic_length) * sizeof(char));
                     template[0] = 0;
-                    strcat(template, "temp.mac0352.");
+                    strcat(template, "temp.mac0352.brunoakamine.");
                     strcat(template, topic_name);
                     strcat(template, ".");
                     DIR * d;
                     struct dirent *dir;
                     d = opendir("/tmp");
+                    int pubs = 0;
                     while ((dir = readdir(d)) != NULL){
                         int ok = 1;
-                        for(i = 0; ok, i < 14 + topic_length; i++) if(template[i] != dir->d_name[i]) ok = 0;
+                        for(i = 0; ok, i < 27 + topic_length; i++) if(template[i] != dir->d_name[i]) ok = 0;
                         if (ok) {
                             char fdname[5 + strlen(dir->d_name)];
                             fdname[0] = 0;
                             strcat(fdname, "/tmp/");
                             strcat(fdname, dir->d_name);
-                            int fd = open(fdname,O_WRONLY);
-                            write(fd, message, strlen(message));
+                            int fd = open(fdname, O_WRONLY | O_NONBLOCK);
+                            if ((n = write(fd, recvline, lenRemainLen + int_remaning_len + 2)) < 0) printf("Print no arquivo %s deu algum erro.\n", dir->d_name);
                             close(fd);
+                            pubs++;
                         }
                     }
+                    printf("%d\n",pubs);
+                    free(template);
                 }
                 if ((int) recvline[0] == 130){//SUBSCRIBE - Control packet type
                     char * topic, * pid_char, * pathname;
-                    int pid_aux, remaning_len = (int) recvline[1], packet_id_msb = (int) recvline[2], packet_id_lsb = (int) recvline[3], topic_length_msb = (int) recvline[4], topic_length_lsb = (int) recvline[5], topic_length = topic_length_msb * 256 + topic_length_lsb, i;
+                    int lenRemainLen = 0;
+                    while(((int) (recvline[1 + lenRemainLen])) >= 128) lenRemainLen = lenRemainLen + 1;
+                    char remaning_len[1 + lenRemainLen];
+                    for(int i = 0; i <= lenRemainLen; i++) remaning_len[i] = recvline[1 + lenRemainLen];
+                    if (lenRemainLen > 4) {
+                        printf("Length of remaning length greater than four. \n");
+                        exit(6);
+                    }
+                    int pid_aux, packet_id_msb = (int) recvline[2 + lenRemainLen], packet_id_lsb = (int) recvline[3 + lenRemainLen], topic_length_msb = (int) recvline[4 + lenRemainLen], topic_length_lsb = (int) recvline[5 + lenRemainLen], topic_length = topic_length_msb * 256 + topic_length_lsb, i;
                     topic = malloc(sizeof(char) * (topic_length + 1));//Subscribe only in one topic
                     for(i = 0, pid_aux = pid; pid_aux > 0; i++, pid_aux = pid_aux/10);
                     pid_char = malloc(sizeof(char) * (i + 1));
                     for (i--, pid_aux = pid; pid_aux > 0; i--, pid_aux = pid_aux/10) pid_char[i] = pid_aux % 10 + '0';
                     pid_char[i] = 0;
-                    pathname = malloc(sizeof(char) * (20 + strlen(pid_char) + topic_length));
+                    pathname = malloc(sizeof(char) * (33 + strlen(pid_char) + topic_length));
                     pathname[0] = 0;
                     for (i = 0; i < topic_length; i++)
-                        topic[i] = recvline[i + 6];
+                        topic[i] = recvline[i + 6 + lenRemainLen];
                     topic[i] = 0;
-                    if ((int) recvline[i + 6] != 0){
-                        printf("Error : Only implemented Qos level 0");
-                        exit(6);
-                    }
                     // Response - SUBACK
                     char suback[5] = {144, 3, packet_id_msb, packet_id_lsb, 0};
                     write(connfd, suback, 5);
-                    strcat(pathname, "/tmp/temp.mac0352.");
+                    strcat(pathname, "/tmp/temp.mac0352.brunoakamine.");
                     strcat(pathname, topic);
                     strcat(pathname, ".");
                     strcat(pathname, pid_char);
                     mkfifo((const char *) pathname, 0644);
-                    /*
-                    int fd = open(pathname, O_RDONLY);
-                    while((n = read(fd, recvline, MAXLINE)) > 0){
-                        recvline[n] = 0;
-                        char publish[4 + topic_length + strlen(recvline)];
-                        publish[0] = 48;
-                        publish[1] = 2 + topic_length + strlen(recvline);
-                        publish[2] = topic_length_msb;
-                        publish[3] = topic_length_lsb;
-                        for(i = 0; i < topic_length; i++) publish[i + 4] = topic[i];
-                        for(i = 0; i < strlen(recvline); i++) publish[i + 4 + topic_length] = recvline[i];
-                        write(connfd, publish, 4 + topic_length + strlen(recvline));
-                    }
-                    */
                     sub_par * args = malloc(sizeof * args);
-                    args->topic_length_lsb = &topic_length_lsb;
-                    args->topic_length_msb = &topic_length_msb;
                     args->connfd = &connfd;
                     args->pathname = pathname;
-                    args->topic = topic;
                     pthread_t t1;
                     pthread_t t2;
                     pthread_create(&t1, NULL, Thread1, args);
@@ -384,6 +363,9 @@ int main (int argc, char **argv) {
                     pthread_join(t2, NULL);
                     unlink((const char * ) pathname);
                     free(args);
+                    free(topic);
+                    free(pid_char);
+                    free(pathname);
                     break;
                 }
                 if ((int) recvline[0] == 192){// PINGREQ - Control packet type
